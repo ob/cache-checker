@@ -1,21 +1,22 @@
 package main
 
 import (
+	"crypto/sha256"
 	"flag"
 	"fmt"
-	"runtime"
-	"path/filepath"
-	"os"
 	"io/ioutil"
+	"os"
 	"path"
-	"crypto/sha256"
+	"path/filepath"
+	"runtime"
 )
 
 func worker(paths <-chan string, results chan<- string, done chan<- bool) {
-    for p := range paths {
+	for p := range paths {
 		data, err := ioutil.ReadFile(p)
 		if err != nil {
-			fmt.Printf("Failed to read %s\n", p)
+			fmt.Printf("%s FAILED [%v]\n", p, err)
+			continue
 		}
 		bn := path.Base(p)
 		sum := sha256.Sum256(data)
@@ -38,31 +39,57 @@ func main() {
 	numWorkers := runtime.NumCPU()
 	fmt.Printf("Running with %d workers\n", numWorkers)
 	rootpath := flag.Arg(0)
-    jobs := make(chan string, 100)
+	jobs := make(chan string, 100)
 	results := make(chan string, 100)
 	done := make(chan bool, 100)
 
-    for w := 1; w <= numWorkers; w++ {
-        go worker(jobs, results, done)
-    }
+	for w := 1; w <= numWorkers; w++ {
+		go worker(jobs, results, done)
+	}
 
 	go func() {
-		err := filepath.Walk(rootpath, func(path string, info os.FileInfo, err error) error {
-			if !info.Mode().IsRegular() {
-				return nil
+		parallelScanners := 0
+		waitChan := make(chan bool, 100)
+		// do a 1-deep parallel scan
+		files, err := ioutil.ReadDir(rootpath)
+		if err != nil {
+			fmt.Printf("failed: %v", err)
+			os.Exit(1)
+		}
+		for _, file := range files {
+			if file.Mode().IsDir() {
+				np := path.Join(rootpath, file.Name())
+				parallelScanners += 1
+				go func() {
+					err := filepath.Walk(np, func(path string, info os.FileInfo, err error) error {
+						if info == nil {
+							fmt.Printf("%s: [%v]\n", path, err)
+							return nil
+						}
+						if !info.Mode().IsRegular() {
+							return nil
+						}
+						jobs <- path
+						return nil
+					})
+					if err != nil {
+						fmt.Printf("%s: walk error [%v]\n", np, err)
+					}
+					waitChan <- true
+				}()
 			}
-			jobs <- path
-			return nil
-		})
+		}
+		fmt.Printf("Waiting for %d parallel scanners\n", parallelScanners)
+		// wait for paralle scanners
+		for w := 0; w < parallelScanners; w++ {
+			<-waitChan
+		}
 		fmt.Printf("Done Scanning\n")
 		close(jobs)
-		if err != nil {
-			fmt.Printf("walk error [%v]\n", err)
-		}
 	}()
 
 	go func() {
-    	for r := range results {
+		for r := range results {
 			fmt.Printf("%s\n", r)
 		}
 	}()
