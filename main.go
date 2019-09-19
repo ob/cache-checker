@@ -11,7 +11,12 @@ import (
 	"runtime"
 )
 
-func worker(paths <-chan string, results chan<- string, done chan<- bool) {
+type Result struct {
+	result bool
+	msg    string
+}
+
+func worker(paths <-chan string, results chan<- Result, done chan<- bool) {
 	for p := range paths {
 		data, err := ioutil.ReadFile(p)
 		if err != nil {
@@ -21,11 +26,11 @@ func worker(paths <-chan string, results chan<- string, done chan<- bool) {
 		bn := path.Base(p)
 		sum := sha256.Sum256(data)
 		strsum := fmt.Sprintf("%x", sum)
-		ret := "OK"
+		ret := Result{true, fmt.Sprintf("%s OK", bn)}
 		if bn != strsum {
-			ret = "FAILED"
-			results <- fmt.Sprintf("%s %s", bn, ret)
+			ret = Result{false, fmt.Sprintf("%s CHECKSUM MISMATCH", bn)}
 		}
+		results <- ret
 	}
 	done <- true
 }
@@ -40,7 +45,7 @@ func main() {
 	fmt.Printf("Running with %d workers\n", numWorkers)
 	rootpath := flag.Arg(0)
 	jobs := make(chan string, 100)
-	results := make(chan string, 100)
+	results := make(chan Result, 100)
 	done := make(chan bool, 100)
 
 	for w := 1; w <= numWorkers; w++ {
@@ -84,14 +89,22 @@ func main() {
 		for w := 0; w < parallelScanners; w++ {
 			<-waitChan
 		}
-		fmt.Printf("Done Scanning\n")
 		close(jobs)
 	}()
 
 	go func() {
+		n := 0
 		for r := range results {
-			fmt.Printf("%s\n", r)
+			// only print failures
+			if !r.result {
+				fmt.Printf("\n%s\n", r.msg)
+			}
+			if n%10 == 0 {
+				fmt.Printf("\r%d", n)
+			}
+			n += 1
 		}
+		fmt.Printf("\n")
 	}()
 
 	// wait for all workers
